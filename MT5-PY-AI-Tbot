@@ -1,0 +1,373 @@
+--- C:\Users\anasw\Documents\GitHub\MT5-PY-AI-Tbot\Export_EURUSD_History.mq5 ---
+
+//+------------------------------------------------------------------+
+//|                                      Export_EURUSD_History.mq5 |
+//|                        Copyright 2025, https://github.com/Anaswar-ash |
+//|                                  author: Ash                     |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2025, https://github.com/Anaswar-ash"
+#property link      "https://github.com/Anaswar-ash"
+#property version   "1.00"
+#property script_show_inputs
+
+//--- input parameters
+input string InpFileName = "raw_price_data.csv"; // File name
+input int    InpDays     = 1000;                 // Number of days
+
+//+------------------------------------------------------------------+
+//| Script program start function                                    |
+//+------------------------------------------------------------------+
+void OnStart()
+  {
+   MqlRates rates[];
+   int      copied;
+
+   //--- get daily price data
+   copied = CopyRates("EURUSD", PERIOD_D1, 0, InpDays, rates);
+   if(copied > 0)
+     {
+      int file_handle = FileOpen(InpFileName, FILE_WRITE | FILE_CSV | FILE_ANSI, ',');
+      if(file_handle != INVALID_HANDLE)
+        {
+         //--- write header
+         FileWrite(file_handle, "Time", "Open", "High", "Low", "Close", "Volume");
+
+         //--- write data
+         for(int i = 0; i < copied; i++)
+           {
+            FileWrite(file_handle,
+                      TimeToString(rates[i].time, TIME_DATE),
+                      DoubleToString(rates[i].open, _Digits),
+                      DoubleToString(rates[i].high, _Digits),
+                      DoubleToString(rates[i].low, _Digits),
+                      DoubleToString(rates[i].close, _Digits),
+                      rates[i].tick_volume);
+           }
+
+         FileClose(file_handle);
+         Print("Data successfully exported to ", InpFileName);
+        }
+      else
+        {
+         Print("Error opening file: ", GetLastError());
+        }
+     }
+   else
+     {
+      Print("Error copying rates: ", GetLastError());
+     }
+  }
+//+------------------------------------------------------------------+
+
+
+--- C:\Users\anasw\Documents\GitHub\MT5-PY-AI-Tbot\Model_Development.py ---
+
+import pandas as pd
+
+# Load the data
+raw_price_df = pd.read_csv("raw_price_data.csv")
+
+# Feature Engineering
+raw_price_df["feature_price_change"] = raw_price_df["Close"].diff()
+
+# Target Engineering
+raw_price_df["y_target_direction"] = (raw_price_df["Close"].shift(-1) > raw_price_df["Close"]).astype(int)
+
+# Drop rows with NaN values
+raw_price_df.dropna(inplace=True)
+
+from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV
+from sklearn.neural_network import MLPClassifier
+
+# --- Hyperparameter Tuning ---
+# Define the parameter search space
+param_distributions = {
+    'hidden_layer_sizes': [(50,), (100,), (50, 50)],
+    'activation': ['tanh', 'relu'],
+    'solver': ['adam', 'sgd'],
+    'learning_rate': ['constant', 'adaptive'],
+}
+
+# Create the neural network model
+neural_network_model = MLPClassifier(max_iter=1000)
+
+# Create the time series split object
+ts_split = TimeSeriesSplit(n_splits=5, gap=1)
+
+# Create the randomized search object
+random_search = RandomizedSearchCV(
+    estimator=neural_network_model,
+    param_distributions=param_distributions,
+    n_iter=10,  # Reduced for faster execution
+    cv=ts_split,
+    scoring='accuracy',
+    random_state=42,
+    n_jobs=-1
+)
+
+# Separate features and target
+X = raw_price_df[['feature_price_change']]
+y = raw_price_df['y_target_direction']
+
+# Fit the randomized search to the data
+random_search.fit(X, y)
+
+# Print the best parameters
+import skl2onnx
+import onnxruntime as rt
+from skl2onnx.common.data_types import FloatTensorType
+
+# --- Final Model Training ---
+# Initialize a new neural network model with the best parameters
+final_model = MLPClassifier(**random_search.best_params_, max_iter=1000)
+
+# Train the model on the entire dataset
+final_model.fit(X, y)
+
+# --- Export to ONNX ---
+# Define the initial types for the ONNX conversion
+initial_type = [('float_input', FloatTensorType([None, 1]))]
+
+# Convert the model to ONNX format
+onnx_model = skl2onnx.convert_sklearn(final_model, initial_types=initial_type)
+
+# Save the ONNX model
+with open("trading_neural_network_model.onnx", "wb") as f:
+    f.write(onnx_model.SerializeToString())
+
+print("Model successfully exported to trading_neural_network_model.onnx")
+
+
+--- C:\Users\anasw\Documents\GitHub\MT5-PY-AI-Tbot\Benchmark_Model_EA.mq5 ---
+
+//+------------------------------------------------------------------+
+//|                                           Benchmark_Model_EA.mq5 |
+//|                        Copyright 2025, https://github.com/Anaswar-ash |
+//|                                  author: Ash                     |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2025, https://github.com/Anaswar-ash"
+#property link      "https://github.com/Anaswar-ash"
+#property version   "1.00"
+
+#include <Trade/Trade.mqh>
+
+//--- ONNX model parameters
+int onnx_handle;
+long onnx_input_shape[] = {1, 1};
+long onnx_output_shape[] = {1, 1};
+
+//--- Expert Advisor parameters
+input double InpLots          = 0.1;
+input int    InpStopLoss      = 50;
+input int    InpTakeProfit    = 100;
+
+CTrade trade;
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+  {
+   onnx_handle = OnnxCreateFromFile("benchmark_logistic_model.onnx");
+   if(onnx_handle == INVALID_HANDLE)
+     {
+      Print("Failed to create ONNX model from file: ", GetLastError());
+      return(INIT_FAILED);
+     }
+
+   if(!OnnxSetInputShape(onnx_handle, 0, onnx_input_shape))
+     {
+      Print("OnnxSetInputShape failed with error: ", GetLastError());
+      return(INIT_FAILED);
+     }
+
+   if(!OnnxSetOutputShape(onnx_handle, 0, onnx_output_shape))
+     {
+      Print("OnnxSetOutputShape failed with error: ", GetLastError());
+      return(INIT_FAILED);
+     }
+
+   return(INIT_SUCCEEDED);
+  }
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+  {
+   if(onnx_handle != INVALID_HANDLE)
+      OnnxRelease(onnx_handle);
+  }
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+  {
+   MqlRates rates[];
+   if(CopyRates(_Symbol, PERIOD_D1, 0, 2, rates) < 2)
+      return;
+
+   float input_data[1];
+   input_data[0] = (float)(rates[1].close - rates[0].close);
+
+   float output_data[1];
+
+   if(!OnnxRun(onnx_handle, input_data, output_data))
+     {
+      Print("OnnxRun failed with error: ", GetLastError());
+      return;
+     }
+
+   if(output_data[0] == 1)
+      trade.Buy(InpLots, _Symbol, 0, 0, 0, "Buy order");
+   else
+      trade.Sell(InpLots, _Symbol, 0, 0, 0, "Sell order");
+  }
+//+------------------------------------------------------------------+
+
+
+--- C:\Users\anasw\Documents\GitHub\MT5-PY-AI-Tbot\Neural_Network_Trader_EA.mq5 ---
+
+//+------------------------------------------------------------------+
+//|                                       Neural_Network_Trader_EA.mq5 |
+//|                        Copyright 2025, https://github.com/Anaswar-ash |
+//|                                  author: Ash                     |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2025, https://github.com/Anaswar-ash"
+#property link      "https://github.com/Anaswar-ash"
+#property version   "1.00"
+
+#include <Trade/Trade.mqh>
+
+//--- ONNX model parameters
+int onnx_handle;
+long onnx_input_shape[] = {1, 1};
+long onnx_output_shape[] = {1, 2};
+
+//--- Expert Advisor parameters
+input double InpLots          = 0.1;
+input int    InpStopLoss      = 50;
+input int    InpTakeProfit    = 100;
+
+CTrade trade;
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+  {
+   onnx_handle = OnnxCreateFromFile("trading_neural_network_model.onnx");
+   if(onnx_handle == INVALID_HANDLE)
+     {
+      Print("Failed to create ONNX model from file: ", GetLastError());
+      return(INIT_FAILED);
+     }
+
+   if(!OnnxSetInputShape(onnx_handle, 0, onnx_input_shape))
+     {
+      Print("OnnxSetInputShape failed with error: ", GetLastError());
+      return(INIT_FAILED);
+     }
+
+   if(!OnnxSetOutputShape(onnx_handle, 0, onnx_output_shape))
+     {
+      Print("OnnxSetOutputShape failed with error: ", GetLastError());
+      return(INIT_FAILED);
+     }
+
+   return(INIT_SUCCEEDED);
+  }
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+  {
+   if(onnx_handle != INVALID_HANDLE)
+      OnnxRelease(onnx_handle);
+  }
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+  {
+   MqlRates rates[];
+   if(CopyRates(_Symbol, PERIOD_D1, 0, 2, rates) < 2)
+      return;
+
+   float input_data[1];
+   input_data[0] = (float)(rates[1].close - rates[0].close);
+
+   float output_data[2];
+
+   if(!OnnxRun(onnx_handle, input_data, output_data))
+     {
+      Print("OnnxRun failed with error: ", GetLastError());
+      return;
+     }
+
+   if(output_data[0] > output_data[1])
+      trade.Sell(InpLots, _Symbol, 0, 0, 0, "Sell order");
+   else
+      trade.Buy(InpLots, _Symbol, 0, 0, 0, "Buy order");
+  }
+//+------------------------------------------------------------------+
+
+
+--- C:\Users\anasw\Documents\GitHub\MT5-PY-AI-Tbot\create_benchmark_model.py ---
+
+import pandas as pd
+from sklearn.linear_model import LogisticRegression
+import skl2onnx
+from skl2onnx.common.data_types import FloatTensorType
+
+# Load the data
+raw_price_df = pd.read_csv("raw_price_data.csv")
+
+# Feature Engineering
+raw_price_df["feature_price_change"] = raw_price_df["Close"].diff()
+
+# Target Engineering
+raw_price_df["y_target_direction"] = (raw_price_df["Close"].shift(-1) > raw_price_df["Close"])
+
+# Drop rows with NaN values
+raw_price_df.dropna(inplace=True)
+
+# Separate features and target
+X = raw_price_df[['feature_price_change']]
+y = raw_price_df['y_target_direction']
+
+# Create and train the logistic regression model
+log_reg_model = LogisticRegression()
+log_reg_model.fit(X, y)
+
+# Convert the model to ONNX format
+initial_type = [('float_input', FloatTensorType([None, 1]))]
+onnx_model = skl2onnx.convert_sklearn(log_reg_model, initial_types=initial_type)
+
+# Save the ONNX model
+with open("benchmark_logistic_model.onnx", "wb") as f:
+    f.write(onnx_model.SerializeToString())
+
+print("Model successfully exported to benchmark_logistic_model.onnx")
+
+
+--- C:\Users\anasw\Documents\GitHub\MT5-PY-AI-Tbot\raw_price_data.csv ---
+
+Time,Open,High,Low,Close,Volume
+2023.01.01,1.1,1.2,1.0,1.15,100
+2023.01.02,1.15,1.25,1.1,1.2,200
+2023.01.03,1.2,1.3,1.15,1.25,300
+2023.01.04,1.25,1.35,1.2,1.3,400
+2023.01.05,1.3,1.4,1.25,1.35,500
+
+
+--- C:\Users\anasw\Documents\GitHub\MT5-PY-AI-Tbot\benchmark_logistic_model.onnx ---
+
+File Path: C:\Users\anasw\Documents\GitHub\MT5-PY-AI-Tbot\benchmark_logistic_model.onnx
+
+--- C:\Users\anasw\Documents\GitHub\MT5-PY-AI-Tbot\trading_neural_network_model.onnx ---
+
+File Path: C:\Users\anasw\Documents\GitHub\MT5-PY-AI-Tbot\trading_neural_network_model.onnx
