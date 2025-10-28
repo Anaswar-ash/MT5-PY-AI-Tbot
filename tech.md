@@ -31,4 +31,4 @@ This project is a trading bot for MetaTrader 5 that uses a machine learning mode
 The project uses two machine learning models:
 
 1.  **Benchmark Model**: A simple logistic regression model that predicts the direction of the next day's price change based on the previous day's price change.
-2.  **Neural Network Model**: A multi-layer perceptron (MLP) classifier that predicts the direction of the next day's price change based on the previous day's price change. The model is trained using hyperparameter tuning with `RandomizedSearchCV` and `TimeSeriesSplit` to find the best parameters.
+2.  **Neural Network Model**: A multi-layer perceptron (MLP) classifier that predicts the direction of the next day's price change based on the previous day's price change. The model is trained using hyperparameter tuning with `RandomizedSearchCV` and `TimeSeriesSplit` to find the best parameters. The hyperparameter search space includes different hidden layer sizes, activation functions, solvers, and learning rates. The exact architecture of the model will vary depending on the results of the hyperparameter tuning.
